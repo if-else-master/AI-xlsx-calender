@@ -6,7 +6,7 @@ def quick_start():
     """快速開始範例"""
     
     # 設定您的 API 金鑰（建議使用環境變數）
-    GEMINI_API_KEY = "AIzaSyA_0U4ZeHCniPaFmm9tmY0keNu4rf_kSzM"  # 替換為您的實際 API 金鑰
+    GEMINI_API_KEY = ""  # 替換為您的實際 API 金鑰
     
     # Google 憑證檔案路徑
     CREDENTIALS_FILE = "credentials.json"  # 確保此檔案在同一目錄下
