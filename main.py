@@ -6,7 +6,7 @@ def quick_start():
     """快速開始範例"""
     
     # 設定您的 API 金鑰（建議使用環境變數）
-    GEMINI_API_KEY = ""  # 替換為您的實際 API 金鑰
+    GEMINI_API_KEY = "AIzaSyA_0U4ZeHCniPaFmm9tmY0keNu4rf_kSzM"  # 替換為您的實際 API 金鑰
     
     # Google 憑證檔案路徑
     CREDENTIALS_FILE = "credentials.json"  # 確保此檔案在同一目錄下
@@ -20,7 +20,7 @@ def quick_start():
         # 1. 建立解析器
         parser = ExcelCalendarAIParser(
             gemini_api_key=GEMINI_API_KEY,
-            google_credentials_file=CREDENTIALS_FILE
+            credentials_file=CREDENTIALS_FILE
         )
         
         # 2. 設定 Google Calendar API（首次使用需要瀏覽器認證）
@@ -29,7 +29,7 @@ def quick_start():
         
         # 3. 一鍵處理：讀取 Excel + AI 解析 + 同步到 Google Calendar
         print("🤖 使用 AI 處理複雜的合併格...")
-        result = parser.process_excel_calendar(EXCEL_FILE)
+        result = parser.process_calendar(EXCEL_FILE)
         
         # 4. 顯示結果
         if result['status'] == 'success':
@@ -77,18 +77,21 @@ def test_ai_parsing_only():
     print("🧪 測試 AI 解析功能...")
     
     try:
-        # 只需要 Gemini API，不需要 Google 憑證
-        parser = ExcelCalendarAIParser(gemini_api_key=GEMINI_API_KEY)
+        # 測試模式需要一個假的憑證檔案參數，但實際上不會使用
+        parser = ExcelCalendarAIParser(
+            gemini_api_key=GEMINI_API_KEY,
+            credentials_file="dummy.json"  # 測試模式不會使用
+        )
         
         # 讀取 Excel
         print("📖 讀取 Excel 檔案...")
-        excel_data = parser.read_excel_with_merged_cells(EXCEL_FILE)
+        excel_data = parser.read_excel_file(EXCEL_FILE)
         print(f"✅ 成功讀取：{excel_data['max_row']} 行，{excel_data['max_col']} 列")
         print(f"🔗 合併格數量：{len(excel_data['merged_ranges'])}")
         
         # AI 解析
         print("🤖 AI 解析中...")
-        events = parser.parse_calendar_with_ai(excel_data)
+        events = parser.ai_parse_calendar(excel_data)
         
         if events:
             print(f"✅ 成功解析出 {len(events)} 個事件：\n")

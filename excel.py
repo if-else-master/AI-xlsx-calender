@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import re
 import pickle
 
-class ExcelCalendarParser:
+class ExcelCalendarAIParser:
     def __init__(self, gemini_api_key, credentials_file):
         """
         Excel 行事曆解析器
@@ -28,7 +28,7 @@ class ExcelCalendarParser:
         # 設定 Gemini API
         try:
             genai.configure(api_key=gemini_api_key)
-            self.model = genai.GenerativeModel('gemini-pro')
+            self.model = genai.GenerativeModel('gemini-2.0-flash')
             print("✅ Gemini API 設定成功")
         except Exception as e:
             raise Exception(f"❌ Gemini API 設定失敗: {str(e)}")
@@ -226,7 +226,12 @@ Excel 數據內容：
 2. 仔細分析日期和時間格式，可能有各種表示方式
 3. 忽略空白或無意義的數據
 4. 如果日期不完整，請根據上下文推測完整日期
-5. 請只返回 JSON 陣列，不要包含任何其他文字
+5. **特別重要：如果一個課程或事件橫跨多個連續時段，請自動合併時間範圍**
+   例如：第一節課8:25~9:05，第二節課9:15~10:05，如果有課程橫跨這兩個時段，
+   則設定時間為8:25~10:05（從第一個時段的開始時間到最後一個時段的結束時間）
+6. 對於課程表格式，請特別注意合併格和跨時段的課程
+7. 連續時段的判斷：如果兩個時段之間的間隔少於30分鐘，視為連續時段
+8. 請只返回 JSON 陣列，不要包含任何其他文字
 
 JSON 格式範例：
 [
@@ -238,6 +243,15 @@ JSON 格式範例：
     "end_time": "12:00",
     "description": "討論重要事項",
     "location": "會議室A"
+  }},
+  {{
+    "title": "數學課（連堂）",
+    "start_date": "2024-12-02",
+    "start_time": "08:25", 
+    "end_date": "2024-12-02",
+    "end_time": "10:05",
+    "description": "橫跨第一、二節課的連堂課程",
+    "location": "教室101"
   }}
 ]
 """
@@ -267,6 +281,9 @@ JSON 格式範例：
                 if len(events) > 5:
                     print(f"  ... 還有 {len(events)-5} 個事件")
             
+            # 後處理：合併相同課程的連續時段
+            events = self._merge_consecutive_events(events)
+            
             return events
             
         except json.JSONDecodeError as e:
@@ -276,6 +293,67 @@ JSON 格式範例：
         except Exception as e:
             print(f"❌ AI 解析失敗: {e}")
             return []
+
+    def _merge_consecutive_events(self, events):
+        """合併相同課程的連續時段"""
+        if not events:
+            return events
+        
+        print("🔄 檢查並合併連續時段...")
+        
+        # 按日期和開始時間排序
+        events_sorted = sorted(events, key=lambda x: (x['start_date'], x['start_time']))
+        
+        merged_events = []
+        i = 0
+        
+        while i < len(events_sorted):
+            current_event = events_sorted[i].copy()
+            
+            # 尋找相同課程名稱的連續事件
+            j = i + 1
+            while j < len(events_sorted):
+                next_event = events_sorted[j]
+                
+                # 檢查是否為相同課程且在同一天
+                if (current_event['title'].strip() == next_event['title'].strip() and 
+                    current_event['start_date'] == next_event['start_date']):
+                    
+                    # 檢查時段是否連續（間隔少於30分鐘）
+                    current_end_time = self._time_to_minutes(current_event['end_time'])
+                    next_start_time = self._time_to_minutes(next_event['start_time'])
+                    
+                    if next_start_time - current_end_time <= 30:  # 30分鐘內視為連續
+                        # 合併時段
+                        current_event['end_time'] = next_event['end_time']
+                        current_event['end_date'] = next_event['end_date']
+                        
+                        # 更新描述
+                        if not current_event.get('description'):
+                            current_event['description'] = ""
+                        if "連堂" not in current_event['description']:
+                            current_event['description'] += " (連堂課程)" if current_event['description'] else "連堂課程"
+                        
+                        print(f"  🔗 合併課程: {current_event['title']} {current_event['start_time']}-{current_event['end_time']}")
+                        j += 1
+                    else:
+                        break
+                else:
+                    break
+            
+            merged_events.append(current_event)
+            i = j if j > i + 1 else i + 1
+        
+        print(f"✅ 時段合併完成，從 {len(events)} 個事件合併為 {len(merged_events)} 個事件")
+        return merged_events
+    
+    def _time_to_minutes(self, time_str):
+        """將時間字符串轉換為分鐘數（從午夜開始計算）"""
+        try:
+            hours, minutes = map(int, time_str.split(':'))
+            return hours * 60 + minutes
+        except:
+            return 0
 
     def create_calendar_events(self, events):
         """在 Google Calendar 中建立事件"""
@@ -403,7 +481,7 @@ def main():
     
     try:
         # 建立解析器
-        parser = ExcelCalendarParser(
+        parser = ExcelCalendarAIParser(
             gemini_api_key=GEMINI_API_KEY,
             credentials_file=CREDENTIALS_FILE
         )
