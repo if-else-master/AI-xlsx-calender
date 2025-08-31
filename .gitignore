@@ -1,4 +1,4 @@
-.venv
-credentials.json
-token.pickle
-service-account-key.json
+.venv/
+credentials.json/
+token.pickle/
+service-account-key.json/
