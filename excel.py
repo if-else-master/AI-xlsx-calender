@@ -185,6 +185,9 @@ class ExcelCalendarAIParser:
         print("🤖 正在使用 AI 解析行事曆數據...")
         
         try:
+            # 分析時間列和合併格的對應關係
+            time_analysis = self._analyze_time_schedule(excel_data)
+            
             # 準備數據字符串（限制長度避免 token 超限）
             data_preview = []
             for i, row in enumerate(excel_data['data'][:25]):  # 取前25行
@@ -193,10 +196,11 @@ class ExcelCalendarAIParser:
             
             data_str = "\n".join(data_preview)
             
-            # 合併格信息
+            # 合併格信息 - 現在包含時間範圍分析
             merged_info = []
             for merged in excel_data['merged_ranges'][:15]:  # 取前15個合併格
-                merged_info.append(f"合併格 {merged['range']}: 第{merged['start_row']}-{merged['end_row']}行，第{merged['start_col']}-{merged['end_col']}列")
+                time_range = self._get_time_range_for_merged_cell(merged, time_analysis)
+                merged_info.append(f"合併格 {merged['range']}: 第{merged['start_row']}-{merged['end_row']}行，第{merged['start_col']}-{merged['end_col']}列，對應時間：{time_range}")
             
             merged_str = "\n".join(merged_info)
             
@@ -222,18 +226,27 @@ Excel 數據內容：
 - location: 地點（可選）
 
 重要提示：
-1. 合併格通常表示跨多天或長時間的事件
+1. **合併格時間對應**：合併格信息中已經包含了該合併格對應的完整時間範圍
+   - 當看到合併格資訊顯示「對應時間：08:25~10:05」時，請直接使用這個時間範圍
+   - 不要只取合併格最上面一格的時間，要使用完整的時間範圍
 2. 仔細分析日期和時間格式，可能有各種表示方式
 3. 忽略空白或無意義的數據
 4. 如果日期不完整，請根據上下文推測完整日期
-5. **特別重要：如果一個課程或事件橫跨多個連續時段，請自動合併時間範圍**
-   例如：第一節課8:25~9:05，第二節課9:15~10:05，如果有課程橫跨這兩個時段，
-   則設定時間為8:25~10:05（從第一個時段的開始時間到最後一個時段的結束時間）
-6. 對於課程表格式，請特別注意合併格和跨時段的課程
-7. 連續時段的判斷：如果兩個時段之間的間隔少於30分鐘，視為連續時段
-8. 請只返回 JSON 陣列，不要包含任何其他文字
+5. **課程表的合併格表示連堂課程**：
+   - 如果一個課程名稱出現在合併格中，它就是一個跨多個時段的連堂課程
+   - 請使用合併格信息中提供的完整時間範圍
+   - 例如：合併格顯示「數學，對應時間：08:25~10:05」，則事件時間就是08:25~10:05
+6. 對於非合併格的單獨課程，使用該格對應的單個時段時間
+7. **重要：請只返回純 JSON 陣列，不要包含任何其他文字、解釋、代碼塊或markdown格式**
+8. **禁止**返回Python代碼或任何程式碼，只要純JSON格式
 
-JSON 格式範例：
+輸出格式要求：
+- 必須是有效的JSON陣列格式
+- 不要使用```json或```包裝
+- 不要有任何前後綴文字說明
+- 直接輸出JSON陣列
+
+正確的輸出範例：
 [
   {{
     "title": "重要會議",
@@ -260,13 +273,47 @@ JSON 格式範例：
             response = self.model.generate_content(prompt)
             response_text = response.text.strip()
             
-            # 清理回應文字
-            if response_text.startswith('```json'):
-                response_text = response_text[7:]
+            print(f"🤖 AI 原始回應長度: {len(response_text)} 字符")
+            print(f"🤖 AI 回應前100字符: {response_text[:100]}...")
+            
+            # 更強化的回應清理邏輯
+            # 移除可能的代碼塊標記
+            if response_text.startswith('```'):
+                # 找到第一個換行後的內容
+                lines = response_text.split('\n')
+                if len(lines) > 1:
+                    response_text = '\n'.join(lines[1:])
+                else:
+                    response_text = response_text[3:]  # 移除```
+            
             if response_text.endswith('```'):
                 response_text = response_text[:-3]
             
+            # 移除其他可能的標記
+            prefixes_to_remove = ['```json', '```python', 'json', 'python']
+            for prefix in prefixes_to_remove:
+                if response_text.startswith(prefix):
+                    response_text = response_text[len(prefix):]
+                    break
+            
             response_text = response_text.strip()
+            
+            # 檢查是否為JSON格式
+            if not response_text.startswith('['):
+                print("⚠️ AI回應可能不是有效的JSON格式，嘗試提取JSON部分...")
+                
+                # 嘗試找到JSON陣列部分
+                start_idx = response_text.find('[')
+                end_idx = response_text.rfind(']')
+                
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    response_text = response_text[start_idx:end_idx+1]
+                    print(f"✅ 提取到JSON部分: {len(response_text)} 字符")
+                else:
+                    print("❌ 無法找到有效的JSON陣列格式")
+                    return []
+            
+            print(f"🔍 處理後的回應前100字符: {response_text[:100]}...")
             
             # 解析 JSON
             events = json.loads(response_text)
@@ -354,6 +401,106 @@ JSON 格式範例：
             return hours * 60 + minutes
         except:
             return 0
+
+    def _analyze_time_schedule(self, excel_data):
+        """分析課程表的時間結構"""
+        print("🕐 分析時間表結構...")
+        
+        time_schedule = {}
+        data = excel_data['data']
+        
+        # 尋找時間列（通常在左邊幾列）
+        for col_idx in range(min(3, excel_data['max_col'])):  # 檢查前3列
+            for row_idx in range(excel_data['max_row']):
+                cell_value = str(data[row_idx][col_idx]).strip()
+                
+                # 檢查是否包含時間格式
+                if self._is_time_format(cell_value):
+                    time_schedule[row_idx + 1] = {  # Excel行號從1開始
+                        'time_text': cell_value,
+                        'parsed_time': self._parse_time_range(cell_value),
+                        'column': col_idx + 1
+                    }
+        
+        print(f"✅ 找到 {len(time_schedule)} 個時間段")
+        return time_schedule
+    
+    def _is_time_format(self, text):
+        """檢查文字是否包含時間格式"""
+        import re
+        
+        # 檢查各種時間格式
+        time_patterns = [
+            r'\d{1,2}:\d{2}',  # 08:30
+            r'\d{1,2}：\d{2}',  # 08：30 (中文冒號)
+            r'第\d+節',  # 第1節
+            r'\d+節',  # 1節
+            r'上午|下午|早上|中午|晚上',  # 時間描述
+        ]
+        
+        for pattern in time_patterns:
+            if re.search(pattern, text):
+                return True
+        return False
+    
+    def _parse_time_range(self, time_text):
+        """解析時間範圍文字"""
+        import re
+        
+        # 提取時間
+        time_matches = re.findall(r'(\d{1,2}):(\d{2})', time_text)
+        if len(time_matches) >= 2:
+            # 有開始和結束時間
+            start_hour, start_min = int(time_matches[0][0]), int(time_matches[0][1])
+            end_hour, end_min = int(time_matches[1][0]), int(time_matches[1][1])
+            return {
+                'start_time': f"{start_hour:02d}:{start_min:02d}",
+                'end_time': f"{end_hour:02d}:{end_min:02d}"
+            }
+        elif len(time_matches) == 1:
+            # 只有一個時間，假設為開始時間
+            start_hour, start_min = int(time_matches[0][0]), int(time_matches[0][1])
+            end_hour = start_hour + 1  # 假設一小時的課程
+            return {
+                'start_time': f"{start_hour:02d}:{start_min:02d}",
+                'end_time': f"{end_hour:02d}:{start_min:02d}"
+            }
+        
+        # 解析節次
+        period_match = re.search(r'第?(\d+)節', time_text)
+        if period_match:
+            period = int(period_match.group(1))
+            # 假設每節課50分鐘，從8:00開始
+            start_hour = 8 + (period - 1)
+            end_hour = start_hour + 1
+            return {
+                'start_time': f"{start_hour:02d}:00",
+                'end_time': f"{end_hour:02d}:00"
+            }
+        
+        return None
+    
+    def _get_time_range_for_merged_cell(self, merged_cell, time_schedule):
+        """獲取合併儲存格對應的時間範圍"""
+        start_row = merged_cell['start_row']
+        end_row = merged_cell['end_row']
+        
+        # 收集這個範圍內所有的時間
+        time_ranges = []
+        for row in range(start_row, end_row + 1):
+            if row in time_schedule:
+                parsed_time = time_schedule[row]['parsed_time']
+                if parsed_time:
+                    time_ranges.append(parsed_time)
+        
+        if not time_ranges:
+            return "無法識別時間"
+        
+        # 找到最早的開始時間和最晚的結束時間
+        earliest_start = min(tr['start_time'] for tr in time_ranges)
+        latest_end = max(tr['end_time'] for tr in time_ranges)
+        
+        return f"{earliest_start}~{latest_end}"
 
     def create_calendar_events(self, events):
         """在 Google Calendar 中建立事件"""
