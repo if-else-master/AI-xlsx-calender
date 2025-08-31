@@ -1,9 +1,10 @@
+# 完整可用的 Excel 行事曆 AI 解析器
 import pandas as pd
 import openpyxl
 from openpyxl import load_workbook
 import google.generativeai as genai
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
+from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -13,79 +14,129 @@ from datetime import datetime, timedelta
 import re
 import pickle
 
-class ExcelCalendarAIParser:
-    def __init__(self, gemini_api_key, google_credentials_file=None):
+class ExcelCalendarParser:
+    def __init__(self, gemini_api_key, credentials_file):
         """
-        初始化解析器
+        Excel 行事曆解析器
         
         Args:
             gemini_api_key (str): Gemini API 金鑰
-            google_credentials_file (str): Google 憑證檔案路徑
+            credentials_file (str): Google 憑證檔案路徑 (credentials.json)
         """
+        print("🚀 初始化 Excel 行事曆解析器...")
+        
         # 設定 Gemini API
-        genai.configure(api_key=gemini_api_key)
-        self.model = genai.GenerativeModel('gemini-pro')
+        try:
+            genai.configure(api_key=gemini_api_key)
+            self.model = genai.GenerativeModel('gemini-pro')
+            print("✅ Gemini API 設定成功")
+        except Exception as e:
+            raise Exception(f"❌ Gemini API 設定失敗: {str(e)}")
         
         # Google Calendar API 設定
         self.SCOPES = ['https://www.googleapis.com/auth/calendar']
-        self.credentials_file = google_credentials_file
+        self.credentials_file = credentials_file
         self.calendar_service = None
         
+        # 檢查憑證檔案是否存在
+        if not os.path.exists(credentials_file):
+            raise FileNotFoundError(f"❌ 找不到憑證檔案: {credentials_file}")
+        
+        print("✅ 初始化完成")
+
     def setup_google_calendar_api(self):
         """設定 Google Calendar API 認證"""
+        print("🔐 開始設定 Google Calendar API...")
+        
         creds = None
+        token_file = 'token.pickle'
         
         # 檢查是否有已保存的憑證
-        if os.path.exists('token.pickle'):
-            with open('token.pickle', 'rb') as token:
+        if os.path.exists(token_file):
+            print("📂 發現已保存的認證token...")
+            with open(token_file, 'rb') as token:
                 creds = pickle.load(token)
         
         # 如果沒有有效憑證，進行認證流程
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not self.credentials_file:
-                    raise ValueError("需要提供 Google 憑證檔案路徑")
-                
-                flow = Flow.from_client_secrets_file(
-                    self.credentials_file, self.SCOPES)
-                flow.redirect_uri = 'http://localhost:8080/callback'
-                
-                # 獲取認證 URL
-                auth_url, _ = flow.authorization_url(prompt='consent')
-                print(f'請在瀏覽器中開啟此 URL 進行認證: {auth_url}')
-                
-                # 獲取認證碼
-                auth_code = input('輸入認證碼: ')
-                flow.fetch_token(code=auth_code)
-                creds = flow.credentials
+                print("🔄 嘗試刷新過期的認證token...")
+                try:
+                    creds.refresh(Request())
+                    print("✅ Token 刷新成功")
+                except Exception as e:
+                    print(f"⚠️ Token 刷新失敗: {e}")
+                    creds = None
             
-            # 保存憑證以供下次使用
-            with open('token.pickle', 'wb') as token:
+            if not creds:
+                print("🌐 需要進行 OAuth 認證...")
+                print("📝 這將會自動開啟瀏覽器進行 Google 帳號授權")
+                
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        self.credentials_file, self.SCOPES)
+                    
+                    # 使用本地服務器接收認證
+                    print("🔗 正在啟動本地認證服務器...")
+                    creds = flow.run_local_server(port=0)
+                    print("✅ OAuth 認證成功")
+                    
+                except Exception as e:
+                    print(f"❌ 自動認證失敗: {e}")
+                    print("💡 嘗試手動認證方法...")
+                    
+                    try:
+                        # 手動認證備用方案
+                        flow = InstalledAppFlow.from_client_secrets_file(
+                            self.credentials_file, self.SCOPES)
+                        
+                        # 獲取認證 URL
+                        auth_url, _ = flow.authorization_url(prompt='consent')
+                        
+                        print("\n" + "="*50)
+                        print("📋 手動認證步驟：")
+                        print("1. 請在瀏覽器中開啟以下 URL：")
+                        print(f"   {auth_url}")
+                        print("2. 完成 Google 帳號授權")
+                        print("3. 複製授權後顯示的認證碼")
+                        print("="*50)
+                        
+                        auth_code = input("請輸入認證碼: ").strip()
+                        flow.fetch_token(code=auth_code)
+                        creds = flow.credentials
+                        print("✅ 手動認證成功")
+                        
+                    except Exception as e2:
+                        raise Exception(f"❌ 所有認證方法都失敗了: {e2}")
+            
+            # 保存憑證
+            with open(token_file, 'wb') as token:
                 pickle.dump(creds, token)
+            print("💾 認證憑證已保存")
         
+        # 建立 Calendar 服務
         self.calendar_service = build('calendar', 'v3', credentials=creds)
-        print("Google Calendar API 認證成功！")
+        print("✅ Google Calendar API 設定完成")
 
-    def read_excel_with_merged_cells(self, file_path, sheet_name=None):
-        """
-        讀取包含合併格的 Excel 檔案
+    def read_excel_file(self, file_path, sheet_name=None):
+        """讀取 Excel 檔案，包括合併格處理"""
+        print(f"📖 正在讀取 Excel 檔案: {file_path}")
         
-        Args:
-            file_path (str): Excel 檔案路徑
-            sheet_name (str): 工作表名稱，預設為第一個工作表
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"❌ 找不到 Excel 檔案: {file_path}")
         
-        Returns:
-            dict: 包含原始數據和合併格信息的字典
-        """
         try:
-            # 使用 openpyxl 讀取檔案以獲得合併格信息
+            # 使用 openpyxl 處理合併格
             workbook = load_workbook(file_path, data_only=True)
+            
             if sheet_name:
+                if sheet_name not in workbook.sheetnames:
+                    raise ValueError(f"❌ 找不到工作表: {sheet_name}")
                 worksheet = workbook[sheet_name]
             else:
                 worksheet = workbook.active
+            
+            print(f"📄 使用工作表: {worksheet.title}")
             
             # 獲取合併格信息
             merged_ranges = []
@@ -98,7 +149,7 @@ class ExcelCalendarAIParser:
                     'end_col': merged_range.max_col
                 })
             
-            # 獲取所有儲存格數據
+            # 讀取所有數據
             data = []
             max_row = worksheet.max_row
             max_col = worksheet.max_column
@@ -107,99 +158,95 @@ class ExcelCalendarAIParser:
                 row_data = []
                 for col in range(1, max_col + 1):
                     cell = worksheet.cell(row, col)
-                    row_data.append(cell.value)
+                    value = cell.value
+                    if value is None:
+                        value = ""
+                    row_data.append(value)
                 data.append(row_data)
             
-            return {
+            result = {
                 'data': data,
                 'merged_ranges': merged_ranges,
                 'max_row': max_row,
-                'max_col': max_col
+                'max_col': max_col,
+                'sheet_name': worksheet.title
             }
             
+            print(f"✅ Excel 讀取完成: {max_row} 行 × {max_col} 列")
+            print(f"🔗 發現 {len(merged_ranges)} 個合併格")
+            
+            return result
+            
         except Exception as e:
-            raise Exception(f"讀取 Excel 檔案時發生錯誤: {str(e)}")
+            raise Exception(f"❌ 讀取 Excel 檔案失敗: {str(e)}")
 
-    def create_ai_prompt_for_calendar(self, excel_data):
-        """
-        為 AI 建立解析行事曆的提示
+    def ai_parse_calendar(self, excel_data):
+        """使用 AI 解析行事曆數據"""
+        print("🤖 正在使用 AI 解析行事曆數據...")
         
-        Args:
-            excel_data (dict): Excel 資料
-        
-        Returns:
-            str: AI 提示文字
-        """
-        # 將資料轉換為字符串格式
-        data_str = ""
-        for i, row in enumerate(excel_data['data']):
-            data_str += f"第{i+1}列: {row}\n"
-        
-        merged_str = ""
-        for merged in excel_data['merged_ranges']:
-            merged_str += f"合併格: {merged['range']} (行 {merged['start_row']}-{merged['end_row']}, 列 {merged['start_col']}-{merged['end_col']})\n"
-        
-        prompt = f"""
-你是一個專業的行事曆資料解析專家。請分析以下來自 Excel 檔案的行事曆數據，這個檔案包含很多合併的儲存格。
+        try:
+            # 準備數據字符串（限制長度避免 token 超限）
+            data_preview = []
+            for i, row in enumerate(excel_data['data'][:25]):  # 取前25行
+                if any(cell for cell in row if cell):  # 跳過空行
+                    data_preview.append(f"第{i+1}行: {row}")
+            
+            data_str = "\n".join(data_preview)
+            
+            # 合併格信息
+            merged_info = []
+            for merged in excel_data['merged_ranges'][:15]:  # 取前15個合併格
+                merged_info.append(f"合併格 {merged['range']}: 第{merged['start_row']}-{merged['end_row']}行，第{merged['start_col']}-{merged['end_col']}列")
+            
+            merged_str = "\n".join(merged_info)
+            
+            # 建立 AI 提示
+            prompt = f"""
+你是專業的行事曆數據分析師。請分析以下 Excel 行事曆數據並提取事件信息。
 
-Excel 數據：
+Excel 數據內容：
 {data_str}
 
 合併格信息：
 {merged_str}
 
-請從這些數據中提取行事曆事件，並以 JSON 格式回傳。每個事件應包含：
-1. title: 事件標題
-2. start_date: 開始日期 (YYYY-MM-DD)
-3. start_time: 開始時間 (HH:MM)，如果沒有具體時間則設為 "09:00"
-4. end_date: 結束日期 (YYYY-MM-DD)
-5. end_time: 結束時間 (HH:MM)，如果沒有具體時間則設為 "18:00"
-6. description: 事件描述（可選）
-7. location: 地點（可選）
+請提取所有有效的行事曆事件，並返回 JSON 格式的數據。
 
-請特別注意：
-- 合併的儲存格可能表示跨多天的事件
-- 時間格式可能多樣化，請盡量解析
-- 如果某些信息不完整，請根據上下文做合理推測
-- 忽略空白或無意義的數據
+每個事件必須包含：
+- title: 事件名稱（必需）
+- start_date: 開始日期，格式 YYYY-MM-DD（必需）
+- start_time: 開始時間，格式 HH:MM，預設 "09:00"
+- end_date: 結束日期，格式 YYYY-MM-DD（必需）
+- end_time: 結束時間，格式 HH:MM，預設 "18:00"
+- description: 事件描述（可選）
+- location: 地點（可選）
 
-請只回傳有效的 JSON 陣列，不要包含其他說明文字。
+重要提示：
+1. 合併格通常表示跨多天或長時間的事件
+2. 仔細分析日期和時間格式，可能有各種表示方式
+3. 忽略空白或無意義的數據
+4. 如果日期不完整，請根據上下文推測完整日期
+5. 請只返回 JSON 陣列，不要包含任何其他文字
 
-範例格式：
+JSON 格式範例：
 [
-  {
-    "title": "會議",
-    "start_date": "2024-01-15",
-    "start_time": "10:00",
-    "end_date": "2024-01-15", 
+  {{
+    "title": "重要會議",
+    "start_date": "2024-12-01",
+    "start_time": "10:00", 
+    "end_date": "2024-12-01",
     "end_time": "12:00",
-    "description": "重要會議",
+    "description": "討論重要事項",
     "location": "會議室A"
-  }
+  }}
 ]
 """
-        return prompt
 
-    def parse_calendar_with_ai(self, excel_data):
-        """
-        使用 AI 解析行事曆數據
-        
-        Args:
-            excel_data (dict): Excel 資料
-        
-        Returns:
-            list: 解析後的行事曆事件列表
-        """
-        try:
-            prompt = self.create_ai_prompt_for_calendar(excel_data)
-            
-            print("正在使用 AI 解析行事曆數據...")
+            # 呼叫 AI
             response = self.model.generate_content(prompt)
-            
-            # 嘗試解析 JSON 回應
             response_text = response.text.strip()
             
-            # 移除可能的 markdown 格式標記
+            # 清理回應文字
             if response_text.startswith('```json'):
                 response_text = response_text[7:]
             if response_text.endswith('```'):
@@ -210,141 +257,124 @@ Excel 數據：
             # 解析 JSON
             events = json.loads(response_text)
             
-            print(f"成功解析出 {len(events)} 個事件")
+            print(f"✅ AI 解析完成，找到 {len(events)} 個事件")
+            
+            # 顯示事件預覽
+            if events:
+                print("📅 事件預覽：")
+                for i, event in enumerate(events[:5], 1):
+                    print(f"  {i}. {event['title']} - {event['start_date']} {event['start_time']}")
+                if len(events) > 5:
+                    print(f"  ... 還有 {len(events)-5} 個事件")
+            
             return events
             
         except json.JSONDecodeError as e:
-            print(f"JSON 解析錯誤: {str(e)}")
-            print(f"AI 回應: {response.text}")
+            print(f"❌ AI 回應的 JSON 格式錯誤: {e}")
+            print(f"AI 原始回應: {response.text[:300]}...")
             return []
         except Exception as e:
-            print(f"AI 解析錯誤: {str(e)}")
+            print(f"❌ AI 解析失敗: {e}")
             return []
 
-    def create_google_calendar_event(self, event_data):
-        """
-        在 Google Calendar 中建立事件
-        
-        Args:
-            event_data (dict): 事件數據
-        
-        Returns:
-            dict: 建立的事件信息
-        """
-        try:
-            # 建立事件對象
-            event = {
-                'summary': event_data['title'],
-                'start': {
-                    'dateTime': f"{event_data['start_date']}T{event_data['start_time']}:00",
-                    'timeZone': 'Asia/Taipei',
-                },
-                'end': {
-                    'dateTime': f"{event_data['end_date']}T{event_data['end_time']}:00",
-                    'timeZone': 'Asia/Taipei',
-                },
-            }
-            
-            # 添加描述（如果有）
-            if event_data.get('description'):
-                event['description'] = event_data['description']
-            
-            # 添加地點（如果有）
-            if event_data.get('location'):
-                event['location'] = event_data['location']
-            
-            # 建立事件
-            created_event = self.calendar_service.events().insert(
-                calendarId='primary',
-                body=event
-            ).execute()
-            
-            return created_event
-            
-        except HttpError as e:
-            print(f"建立 Google Calendar 事件時發生錯誤: {str(e)}")
-            return None
-        except Exception as e:
-            print(f"建立事件時發生錯誤: {str(e)}")
-            return None
-
-    def sync_to_google_calendar(self, events):
-        """
-        將事件同步到 Google Calendar
-        
-        Args:
-            events (list): 事件列表
-        
-        Returns:
-            dict: 同步結果統計
-        """
+    def create_calendar_events(self, events):
+        """在 Google Calendar 中建立事件"""
         if not self.calendar_service:
-            print("請先設定 Google Calendar API")
-            return {'success': 0, 'failed': 0}
+            raise Exception("❌ Google Calendar 服務未設定")
+        
+        print(f"📅 開始同步 {len(events)} 個事件到 Google Calendar...")
         
         success_count = 0
         failed_count = 0
+        failed_events = []
         
-        print(f"開始同步 {len(events)} 個事件到 Google Calendar...")
-        
-        for i, event in enumerate(events, 1):
-            print(f"正在建立事件 {i}/{len(events)}: {event['title']}")
-            
-            result = self.create_google_calendar_event(event)
-            if result:
+        for i, event_data in enumerate(events, 1):
+            try:
+                print(f"正在建立事件 {i}/{len(events)}: {event_data['title']}")
+                
+                # 建立 Google Calendar 事件
+                calendar_event = {
+                    'summary': event_data['title'],
+                    'start': {
+                        'dateTime': f"{event_data['start_date']}T{event_data['start_time']}:00",
+                        'timeZone': 'Asia/Taipei',
+                    },
+                    'end': {
+                        'dateTime': f"{event_data['end_date']}T{event_data['end_time']}:00",
+                        'timeZone': 'Asia/Taipei',
+                    },
+                }
+                
+                # 添加可選欄位
+                if event_data.get('description'):
+                    calendar_event['description'] = event_data['description']
+                if event_data.get('location'):
+                    calendar_event['location'] = event_data['location']
+                
+                # 建立事件
+                result = self.calendar_service.events().insert(
+                    calendarId='primary',
+                    body=calendar_event
+                ).execute()
+                
                 success_count += 1
-                print(f"✓ 成功建立事件: {event['title']}")
-            else:
+                print(f"  ✅ 成功建立事件")
+                
+            except Exception as e:
                 failed_count += 1
-                print(f"✗ 建立事件失敗: {event['title']}")
+                failed_events.append({
+                    'event': event_data,
+                    'error': str(e)
+                })
+                print(f"  ❌ 建立失敗: {str(e)}")
         
         return {
             'success': success_count,
             'failed': failed_count,
-            'total': len(events)
+            'total': len(events),
+            'failed_events': failed_events
         }
 
-    def process_excel_calendar(self, excel_file_path, sheet_name=None):
-        """
-        處理整個流程：讀取 Excel -> AI 解析 -> 同步到 Google Calendar
+    def process_calendar(self, excel_file, sheet_name=None):
+        """完整處理流程"""
+        print("=" * 60)
+        print("🎯 Excel 行事曆 AI 同步工具")
+        print("=" * 60)
         
-        Args:
-            excel_file_path (str): Excel 檔案路徑
-            sheet_name (str): 工作表名稱
-        
-        Returns:
-            dict: 處理結果
-        """
         try:
-            print("=" * 50)
-            print("開始處理 Excel 行事曆...")
+            # 1. 讀取 Excel
+            print("\n📖 步驟 1: 讀取 Excel 檔案")
+            excel_data = self.read_excel_file(excel_file, sheet_name)
             
-            # 1. 讀取 Excel 檔案
-            print("步驟 1: 讀取 Excel 檔案...")
-            excel_data = self.read_excel_with_merged_cells(excel_file_path, sheet_name)
-            print(f"✓ 成功讀取 Excel，包含 {excel_data['max_row']} 行 {excel_data['max_col']} 列")
-            print(f"✓ 發現 {len(excel_data['merged_ranges'])} 個合併格")
-            
-            # 2. 使用 AI 解析
-            print("\n步驟 2: 使用 AI 解析行事曆數據...")
-            events = self.parse_calendar_with_ai(excel_data)
+            # 2. AI 解析
+            print("\n🤖 步驟 2: AI 智能解析")
+            events = self.ai_parse_calendar(excel_data)
             
             if not events:
+                print("❌ 沒有找到任何有效事件")
                 return {
-                    'status': 'failed',
-                    'message': '無法從 Excel 中解析出有效的行事曆事件',
-                    'events': []
+                    'status': 'no_events',
+                    'message': '沒有找到任何有效的行事曆事件'
                 }
             
             # 3. 同步到 Google Calendar
-            print("\n步驟 3: 同步到 Google Calendar...")
-            sync_result = self.sync_to_google_calendar(events)
+            print("\n📅 步驟 3: 同步到 Google Calendar")
+            sync_result = self.create_calendar_events(events)
             
-            print("\n" + "=" * 50)
-            print("處理完成！")
-            print(f"總事件數: {sync_result['total']}")
-            print(f"成功同步: {sync_result['success']}")
-            print(f"同步失敗: {sync_result['failed']}")
+            # 顯示結果
+            print("\n" + "=" * 60)
+            print("🎉 處理完成！")
+            print(f"📊 統計結果：")
+            print(f"   總事件數: {sync_result['total']}")
+            print(f"   成功同步: {sync_result['success']}")
+            print(f"   同步失敗: {sync_result['failed']}")
+            
+            if sync_result['failed'] > 0:
+                print("\n❌ 失敗的事件：")
+                for failed in sync_result['failed_events'][:3]:
+                    print(f"   - {failed['event']['title']}: {failed['error']}")
+            
+            print("=" * 60)
             
             return {
                 'status': 'success',
@@ -353,40 +383,50 @@ Excel 數據：
             }
             
         except Exception as e:
-            print(f"處理過程中發生錯誤: {str(e)}")
+            print(f"\n❌ 處理失敗: {str(e)}")
             return {
                 'status': 'error',
                 'message': str(e)
             }
 
 
-# 使用範例
+# 簡單使用範例
 def main():
-    # 設定 API 金鑰和憑證檔案
-    GEMINI_API_KEY = "your_gemini_api_key_here"  # 請替換為您的 Gemini API 金鑰
-    GOOGLE_CREDENTIALS_FILE = "credentials.json"  # Google 憑證檔案路徑
+    """主程式 - 一鍵執行"""
     
-    # 建立解析器
-    parser = ExcelCalendarAIParser(
-        gemini_api_key=GEMINI_API_KEY,
-        google_credentials_file=GOOGLE_CREDENTIALS_FILE
-    )
+    # ⚠️ 請替換以下參數 ⚠️
+    GEMINI_API_KEY = "your_gemini_api_key_here"    # 您的 Gemini API 金鑰
+    CREDENTIALS_FILE = "credentials.json"          # Google 憑證檔案路徑
+    EXCEL_FILE = "calendar.xlsx"                   # Excel 行事曆檔案路徑
+    
+    print("🚀 啟動 Excel 行事曆 AI 同步工具")
     
     try:
+        # 建立解析器
+        parser = ExcelCalendarParser(
+            gemini_api_key=GEMINI_API_KEY,
+            credentials_file=CREDENTIALS_FILE
+        )
+        
         # 設定 Google Calendar API
         parser.setup_google_calendar_api()
         
-        # 處理 Excel 行事曆
-        excel_file = "calendar.xlsx"  # 請替換為您的 Excel 檔案路徑
-        result = parser.process_excel_calendar(excel_file)
+        # 處理行事曆
+        result = parser.process_calendar(EXCEL_FILE)
         
         if result['status'] == 'success':
-            print("行事曆同步成功完成！")
+            print("\n🎊 太棒了！您的 Excel 行事曆已成功同步到 Google Calendar！")
+            print("📱 現在可以在手機和電腦上的 Google Calendar 中查看您的事件了")
         else:
-            print(f"處理失敗: {result.get('message', '未知錯誤')}")
-            
+            print(f"\n😔 處理過程遇到問題: {result.get('message', '未知錯誤')}")
+    
     except Exception as e:
-        print(f"主程式執行錯誤: {str(e)}")
+        print(f"\n💥 程式執行錯誤: {str(e)}")
+        print("\n🔧 請檢查：")
+        print("1. Gemini API 金鑰是否正確")
+        print("2. credentials.json 檔案是否存在")
+        print("3. Excel 檔案路徑是否正確")
+        print("4. 網路連線是否正常")
 
 
 if __name__ == "__main__":
